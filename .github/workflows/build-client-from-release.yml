@@ -32,8 +32,11 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $asset = 'https://github.com/gzdevp/app-installer/releases/download/1/Client_DLL_v0_9_System32_Fonte_Build_Setup.zip'
+          $asset = 'https://github.com/gzdevp/app-installer/releases/download/1/Client_DLL_v0_10_Testes_Corrigidos_Fonte.zip'
           Invoke-WebRequest -Uri $asset -OutFile 'fonte.zip'
+          $digest = (Get-FileHash 'fonte.zip' -Algorithm SHA256).Hash.ToLowerInvariant()
+          $expected = 'e7aa8fc823651d8f39dcfea831aff3503a5002311a8ccd6ed189ce4a0ea4c4e1'
+          if ($digest -ne $expected) { throw "ZIP difere do fonte validado (SHA256 $digest)." }
           Expand-Archive -LiteralPath 'fonte.zip' -DestinationPath '.' -Force
           foreach ($p in @('core_source/go.mod','host_source/ClientHost.c','setup_source/go.mod')) {
             if (-not (Test-Path $p)) { throw "Arquivo obrigatorio ausente: $p" }
@@ -125,7 +128,7 @@ jobs:
       - name: Salvar pacote experimental sem alterar Release principal
         uses: actions/upload-artifact@v4
         with:
-          name: Client-DLL-v0_9-Experimental
+          name: Client-DLL-v0_10-Experimental
           path: |
             dist/Client.exe
             dist/appcore.dll
@@ -135,7 +138,7 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-      - name: Testes de regressao do codigo legado
+      - name: Testes de regressao do codigo legado corrigido
         shell: msys2 {0}
         run: |
           set +e
@@ -151,7 +154,7 @@ jobs:
           echo "- Testes do instalador: codigo $setup_result" >> "$GITHUB_STEP_SUMMARY"
           echo '- Compilacao e carregamento nao confirmam funcionamento no FiveM.' >> "$GITHUB_STEP_SUMMARY"
           if [ "$core_result" -ne 0 ] || [ "$setup_result" -ne 0 ]; then
-            echo 'Testes legados falharam; pacote apenas experimental.'
+            echo 'Ha testes que ainda falham no codigo corrigido; nao liberar como estavel.'
             exit 1
           fi
           echo 'Testes passaram; ainda precisa de validacao no FiveM.'
