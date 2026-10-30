@@ -14,6 +14,68 @@ jobs:
     runs-on: windows-2022
     timeout-minutes: 45
     steps:
+      - name: Localizar ZIP v0.10 nas Releases e verificar SHA-256
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $repository = $env:GITHUB_REPOSITORY
+          $target = 'Client_DLL_v0_10_Testes_Corrigidos_Fonte.zip'
+          $expected = 'e7aa8fc823651d8f39dcfea831aff3503a5002311a8ccd6ed189ce4a0ea4c4e1'
+
+          # Consulta as Releases do proprio repositorio usando o token temporario do Actions.
+          $headers = @{
+            Authorization = "Bearer $env:GH_TOKEN"
+            Accept = 'application/vnd.github+json'
+            'X-GitHub-Api-Version' = '2022-11-28'
+          }
+          $uri = "https://api.github.com/repos/$repository/releases?per_page=100"
+          $releases = @(Invoke-RestMethod -Uri $uri -Headers $headers)
+          $found = @()
+          foreach ($release in $releases) {
+            foreach ($asset in @($release.assets)) {
+              if ($asset.name -eq $target) {
+                $found += [pscustomobject]@{ Tag = $release.tag_name; File = $asset.name }
+              }
+            }
+          }
+
+          if ($found.Count -eq 0) {
+            Write-Host '=== Assets disponiveis nas Releases do repositorio ==='
+            $inventory = @()
+            foreach ($release in $releases) {
+              foreach ($asset in @($release.assets)) {
+                $line = "Tag $($release.tag_name): $($asset.name)"
+                $inventory += $line
+                Write-Host $line
+              }
+            }
+            if ($inventory.Count -eq 0) { Write-Host '(nenhum asset disponivel)' }
+            Add-Content $env:GITHUB_STEP_SUMMARY '### Faltou o ZIP fonte na Release'
+            Add-Content $env:GITHUB_STEP_SUMMARY "O arquivo **$target** nao esta em nenhuma Release publicada. Envie exatamente esse ZIP em **Releases -> 1 -> Edit -> Assets** e salve a edicao."
+            throw "ZIP v0.10 ausente do GitHub: $target. Veja acima a lista de arquivos encontrados."
+          }
+
+          # Prioriza a tag 1 se o mesmo arquivo estiver em varias Releases.
+          $chosen = @($found | Where-Object { $_.Tag -eq '1' } | Select-Object -First 1)
+          if ($chosen.Count -eq 0) { $chosen = @($found | Select-Object -First 1) }
+          $tag = $chosen[0].Tag
+          Write-Host "Encontrado ZIP: tag=$tag nome=$target"
+          & gh release download $tag --repo $repository --pattern $target --output fonte.zip
+          if ($LASTEXITCODE -ne 0) { throw "Falha no download autenticado do asset $target (tag $tag)." }
+          if (-not (Test-Path 'fonte.zip')) { throw 'Download nao gerou fonte.zip.' }
+          $digest = (Get-FileHash 'fonte.zip' -Algorithm SHA256).Hash.ToLowerInvariant()
+          Write-Host "SHA256: $digest"
+          if ($digest -ne $expected) {
+            throw "Arquivo encontrado, mas o SHA256 difere do fonte validado. Esperado: $expected; obtido: $digest. Nao compilar arquivo incorreto."
+          }
+          Expand-Archive -LiteralPath 'fonte.zip' -DestinationPath '.' -Force
+          foreach ($p in @('core_source/go.mod','host_source/ClientHost.c','setup_source/go.mod')) {
+            if (-not (Test-Path $p)) { throw "Arquivo obrigatorio ausente no ZIP: $p" }
+          }
+          Write-Host 'ZIP autentico extraido com estrutura correta.'
+
       - name: Instalar Go
         uses: actions/setup-go@v5
         with:
@@ -28,19 +90,6 @@ jobs:
           path-type: inherit
           install: mingw-w64-x86_64-gcc mingw-w64-x86_64-binutils
 
-      - name: Baixar e extrair codigo da Release 1
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $asset = 'https://github.com/gzdevp/app-installer/releases/download/1/Client_DLL_v0_10_Testes_Corrigidos_Fonte.zip'
-          Invoke-WebRequest -Uri $asset -OutFile 'fonte.zip'
-          $digest = (Get-FileHash 'fonte.zip' -Algorithm SHA256).Hash.ToLowerInvariant()
-          $expected = 'e7aa8fc823651d8f39dcfea831aff3503a5002311a8ccd6ed189ce4a0ea4c4e1'
-          if ($digest -ne $expected) { throw "ZIP difere do fonte validado (SHA256 $digest)." }
-          Expand-Archive -LiteralPath 'fonte.zip' -DestinationPath '.' -Force
-          foreach ($p in @('core_source/go.mod','host_source/ClientHost.c','setup_source/go.mod')) {
-            if (-not (Test-Path $p)) { throw "Arquivo obrigatorio ausente: $p" }
-          }
 
       - name: Compilar DLL e Host sem dependencias externas MinGW
         shell: msys2 {0}
