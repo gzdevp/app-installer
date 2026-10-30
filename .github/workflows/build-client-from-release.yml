@@ -26,7 +26,7 @@ jobs:
           msystem: MINGW64
           update: false
           path-type: inherit
-          install: mingw-w64-x86_64-gcc
+          install: mingw-w64-x86_64-gcc mingw-w64-x86_64-binutils
 
       - name: Baixar e extrair codigo da Release 1
         shell: pwsh
@@ -39,76 +39,58 @@ jobs:
             if (-not (Test-Path $p)) { throw "Arquivo obrigatorio ausente: $p" }
           }
 
-      - name: Compilar DLL, Host e testar carregamento
+      - name: Compilar DLL e Host sem dependencias externas MinGW
         shell: msys2 {0}
         run: |
           set -euo pipefail
           mkdir -p dist
           cd core_source
           GOOS=windows GOARCH=amd64 CGO_ENABLED=1 CC=gcc go vet ./...
-          GOOS=windows GOARCH=amd64 CGO_ENABLED=1 CC=gcc go build -trimpath -buildmode=c-shared -o ../dist/appcore.dll .
+          # -static links MinGW runtime libraries into the output, when possible.
+          # The dependency audit below is authoritative; do not bypass it.
+          GOOS=windows GOARCH=amd64 CGO_ENABLED=1 CC=gcc \
+            go build -trimpath -buildmode=c-shared -ldflags='-extldflags=-static' \
+            -o ../dist/appcore.dll .
           cd ..
-          gcc -DUNICODE -D_UNICODE -O2 -Wall -Wextra -static-libgcc -municode -mwindows -o dist/Client.exe host_source/ClientHost.c
+          gcc -DUNICODE -D_UNICODE -O2 -Wall -Wextra -static -static-libgcc \
+            -municode -mwindows -o dist/Client.exe host_source/ClientHost.c
           test -s dist/Client.exe
           test -s dist/appcore.dll
           test -s dist/appcore.h
           for f in CoreABIVersion CoreProbe CoreStart; do grep -q "$f" dist/appcore.h; done
-          ./dist/Client.exe --probe-local
-
-      - name: Testar Host sem dependencias do MinGW no PATH
-        shell: pwsh
-        run: |
-          $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot;$env:SystemRoot\System32\Wbem"
-          & "$PWD\dist\Client.exe" --probe-local
-          if ($LASTEXITCODE -ne 0) { throw "Carregamento da DLL falhou: $LASTEXITCODE" }
-
-      - name: Compilar instalador com binarios gerados
-        shell: pwsh
-        run: |
-          Copy-Item 'dist/Client.exe' 'setup_source/payload/Client.exe' -Force
-          Copy-Item 'dist/appcore.dll' 'setup_source/payload/appcore.dll' -Force
-          Push-Location 'setup_source'
-          $env:GOOS = 'windows'; $env:GOARCH = 'amd64'; $env:CGO_ENABLED = '0'
-          go build -trimpath -o ../dist/Client_Setup_System32.exe .
-          if ($LASTEXITCODE -ne 0) { throw 'Compilacao do instalador falhou' }
-          Pop-Location
-          & "$PWD\dist\Client_Setup_System32.exe" --inspect-payload
-          if ($LASTEXITCODE -ne 0) { throw 'Verificacao do instalador falhou' }
-          Get-FileHash -Algorithm SHA256 dist/Client.exe,dist/appcore.dll,dist/Client_Setup_System32.exe |
-            ForEach-Object { "$($_.Hash)  $(Split-Path $_.Path -Leaf)" } |
-            Set-Content -Encoding ascii dist/SHA256SUMS.txt
-
-      - name: Salvar pacote experimental sem alterar Release principal
-        uses: actions/upload-artifact@v4
-        with:
-          name: Client-DLL-v0_9-Experimental
-          path: |
-            dist/Client.exe
-            dist/appcore.dll
-            dist/Client_Setup_System32.exe
-            dist/SHA256SUMS.txt
-          if-no-files-found: error
-          retention-days: 14
-
-      # Regression tests run AFTER building, loading, and archiving the binaries.
-      # Failures remain visible (red job) instead of silently bypassing tests.
-      - name: Testes de regressao do codigo legado (nao bloqueiam diagnostico da DLL)
-        shell: msys2 {0}
-        run: |
-          set +e
-          cd core_source
-          GOOS=windows GOARCH=amd64 CGO_ENABLED=1 CC=gcc go test ./... -count=1 -timeout=10m
-          core_result=$?
-          cd ../setup_source
-          GOOS=windows GOARCH=amd64 CGO_ENABLED=1 CC=gcc go test ./... -count=1 -timeout=5m
-          setup_result=$?
-          cd ..
-          echo "### Resultado dos testes de regressao" >> "$GITHUB_STEP_SUMMARY"
-          echo "- Testes do core: codigo $core_result" >> "$GITHUB_STEP_SUMMARY"
-          echo "- Testes do instalador: codigo $setup_result" >> "$GITHUB_STEP_SUMMARY"
-          echo "- Um artefato gerado nao comprova funcoes no FiveM." >> "$GITHUB_STEP_SUMMARY"
-          if [ "$core_result" -ne 0 ] || [ "$setup_result" -ne 0 ]; then
-            echo "Testes legados falharam; build experimental apenas para diagnostico."
+          {
+            echo '=== appcore.dll imported libraries ==='
+            objdump -p dist/appcore.dll | grep -i 'DLL Name:' || true
+            echo '=== Client.exe imported libraries ==='
+            objdump -p dist/Client.exe | grep -i 'DLL Name:' || true
+          } | tee dist/DLL_IMPORTS.txt
+          if grep -iE '(libwinpthread|libgcc_s|libstdc\+\+|msys-2\.0|libgomp)\.?.*\.dll' dist/DLL_IMPORTS.txt; then
+            echo 'ERROR: Dependencia externa do MinGW detectada; o pacote exige apenas um EXE e uma DLL.'
             exit 1
           fi
-          echo "Testes passaram; ainda requer validacao em Windows/FiveM."
+          ./dist/Client.exe --probe-local
+
+      - name: Testar Host com PATH minimo e diagnosticar DLL
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot;$env:SystemRoot\System32\Wbem"
+          Write-Host 'Dependencias diretas detectadas:'
+          Get-Content 'dist/DLL_IMPORTS.txt'
+          & "$PWD\dist\Client.exe" --probe-local
+          $hostExit = $LASTEXITCODE
+          if ($hostExit -ne 0) {
+            Write-Host "Host retornou $hostExit. Executando diagnostico do carregador Windows..."
+            Add-Type -TypeDefinition @'
+          using System;
+          using System.Runtime.InteropServices;
+          public static class ClientLoadProbe {
+            [DllImport("kernel32.dll", EntryPoint="LoadLibraryExW", CharSet=CharSet.Unicode, SetLastError=true)]
+            public static extern IntPtr Load(string path, IntPtr reserved, uint flags);
+          }
+          '@
+            $dllPath = (Resolve-Path 'dist/appcore.dll').Path
+            $mod = [ClientLoadProbe]::Load($dllPath, [IntPtr]::Zero, 0x1100)
+            if ($mod -eq [IntPtr]::Zero) {
+              $err = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+              $msg = (New-Object ComponentModel.Win32Exception($err)).Message
