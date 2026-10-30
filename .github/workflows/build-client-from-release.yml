@@ -70,27 +70,27 @@ jobs:
           fi
           ./dist/Client.exe --probe-local
 
-      - name: Testar Host com PATH minimo e diagnosticar DLL
+      - name: Testar carregamento com PATH minimo e diagnosticar DLL
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
+          # Reproduz um Windows sem runtime MSYS2/MinGW no PATH.
           $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot;$env:SystemRoot\System32\Wbem"
-          Write-Host 'Dependencias diretas detectadas:'
+          Write-Host '=== Dependencias diretas ==='
           Get-Content 'dist/DLL_IMPORTS.txt'
+          Write-Host '=== Teste Client.exe --probe-local ==='
           & "$PWD\dist\Client.exe" --probe-local
-          $hostExit = $LASTEXITCODE
-          if ($hostExit -ne 0) {
-            Write-Host "Host retornou $hostExit. Executando diagnostico do carregador Windows..."
-            Add-Type -TypeDefinition @'
-          using System;
-          using System.Runtime.InteropServices;
-          public static class ClientLoadProbe {
-            [DllImport("kernel32.dll", EntryPoint="LoadLibraryExW", CharSet=CharSet.Unicode, SetLastError=true)]
-            public static extern IntPtr Load(string path, IntPtr reserved, uint flags);
-          }
-          '@
-            $dllPath = (Resolve-Path 'dist/appcore.dll').Path
-            $mod = [ClientLoadProbe]::Load($dllPath, [IntPtr]::Zero, 0x1100)
-            if ($mod -eq [IntPtr]::Zero) {
-              $err = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
-              $msg = (New-Object ComponentModel.Win32Exception($err)).Message
+          $exitCode = $LASTEXITCODE
+          Write-Host "Codigo de saida do Host: $exitCode"
+          if ($exitCode -ne 0) {
+            Write-Host '=== Diagnostico Windows LoadLibraryExW ==='
+            # Texto de uma linha evita here-string/C# multilinha quebrando o parser PowerShell.
+            $member = '[System.Runtime.InteropServices.DllImport("kernel32.dll", EntryPoint="LoadLibraryExW", CharSet=System.Runtime.InteropServices.CharSet.Unicode, SetLastError=true)] public static extern System.IntPtr Load(string path, System.IntPtr reserved, uint flags);'
+            Add-Type -Namespace ClientDiagnostics -Name NativeLoader -MemberDefinition $member -ErrorAction Stop
+            $dllFile = (Resolve-Path 'dist/appcore.dll').Path
+            $module = [ClientDiagnostics.NativeLoader]::Load($dllFile, [IntPtr]::Zero, 0x1100)
+            if ($module -eq [IntPtr]::Zero) {
+              $win32Code = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+              $description = [ComponentModel.Win32Exception]::new($win32Code).Message
+              throw "Falha no LoadLibraryExW: erro Windows $win32Code - $description. Host exit code: $exitCode."
+            }
