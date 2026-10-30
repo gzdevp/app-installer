@@ -14,15 +14,15 @@ jobs:
     runs-on: windows-2022
     timeout-minutes: 45
     steps:
-      - name: Localizar ZIP v0.10 nas Releases e verificar SHA-256
+      - name: Localizar ZIP v0.11 nas Releases e verificar SHA-256
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           $ErrorActionPreference = 'Stop'
           $repository = $env:GITHUB_REPOSITORY
-          $target = 'Client_DLL_v0_10_Testes_Corrigidos_Fonte.zip'
-          $expected = 'e7aa8fc823651d8f39dcfea831aff3503a5002311a8ccd6ed189ce4a0ea4c4e1'
+          $target = 'Client_DLL_v0_11_CoreTests_Fonte.zip'
+          $expected = '6906b6e5a3c55db3ba7d15c24cc86985c4dd536e0469bb5f71ed9c3ba431860d'
 
           # Consulta as Releases do proprio repositorio usando o token temporario do Actions.
           $headers = @{
@@ -54,7 +54,7 @@ jobs:
             if ($inventory.Count -eq 0) { Write-Host '(nenhum asset disponivel)' }
             Add-Content $env:GITHUB_STEP_SUMMARY '### Faltou o ZIP fonte na Release'
             Add-Content $env:GITHUB_STEP_SUMMARY "O arquivo **$target** nao esta em nenhuma Release publicada. Envie exatamente esse ZIP em **Releases -> 1 -> Edit -> Assets** e salve a edicao."
-            throw "ZIP v0.10 ausente do GitHub: $target. Veja acima a lista de arquivos encontrados."
+            throw "ZIP v0.11 ausente do GitHub: $target. Veja acima a lista de arquivos encontrados."
           }
 
           # Prioriza a tag 1 se o mesmo arquivo estiver em varias Releases.
@@ -177,7 +177,7 @@ jobs:
       - name: Salvar pacote experimental sem alterar Release principal
         uses: actions/upload-artifact@v4
         with:
-          name: Client-DLL-v0_10-Experimental
+          name: Client-DLL-v0_11-Experimental
           path: |
             dist/Client.exe
             dist/appcore.dll
