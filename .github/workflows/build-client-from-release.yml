@@ -94,3 +94,67 @@ jobs:
               $description = [ComponentModel.Win32Exception]::new($win32Code).Message
               throw "Falha no LoadLibraryExW: erro Windows $win32Code - $description. Host exit code: $exitCode."
             }
+            throw "A DLL carregou no LoadLibraryExW, mas o Host saiu com codigo $exitCode. Verifique exports, ABI e CoreProbe."
+          }
+          Write-Host 'OK: Client.exe carregou appcore.dll com PATH minimo.'
+
+      - name: Compilar instalador com binarios gerados
+        shell: pwsh
+        run: |
+          Copy-Item 'dist/Client.exe' 'setup_source/payload/Client.exe' -Force
+          Copy-Item 'dist/appcore.dll' 'setup_source/payload/appcore.dll' -Force
+          Push-Location 'setup_source'
+          $env:GOOS = 'windows'; $env:GOARCH = 'amd64'; $env:CGO_ENABLED = '0'
+          go build -trimpath -o ../dist/Client_Setup_System32.exe .
+          if ($LASTEXITCODE -ne 0) { throw 'Compilacao do instalador falhou' }
+          Pop-Location
+          & "$PWD\dist\Client_Setup_System32.exe" --inspect-payload
+          if ($LASTEXITCODE -ne 0) { throw 'Verificacao do instalador falhou' }
+          Get-FileHash -Algorithm SHA256 dist/Client.exe,dist/appcore.dll,dist/Client_Setup_System32.exe |
+            ForEach-Object { "$($_.Hash)  $(Split-Path $_.Path -Leaf)" } |
+            Set-Content -Encoding ascii dist/SHA256SUMS.txt
+
+      - name: Salvar pacote experimental sem alterar Release principal
+        uses: actions/upload-artifact@v4
+        with:
+          name: Client-DLL-v0_9-Experimental
+          path: |
+            dist/Client.exe
+            dist/appcore.dll
+            dist/Client_Setup_System32.exe
+            dist/SHA256SUMS.txt
+            dist/DLL_IMPORTS.txt
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Testes de regressao do codigo legado
+        shell: msys2 {0}
+        run: |
+          set +e
+          cd core_source
+          GOOS=windows GOARCH=amd64 CGO_ENABLED=1 CC=gcc go test ./... -count=1 -timeout=10m
+          core_result=$?
+          cd ../setup_source
+          GOOS=windows GOARCH=amd64 CGO_ENABLED=1 CC=gcc go test ./... -count=1 -timeout=5m
+          setup_result=$?
+          cd ..
+          echo '### Resultado dos testes de regressao' >> "$GITHUB_STEP_SUMMARY"
+          echo "- Testes do core: codigo $core_result" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Testes do instalador: codigo $setup_result" >> "$GITHUB_STEP_SUMMARY"
+          echo '- Compilacao e carregamento nao confirmam funcionamento no FiveM.' >> "$GITHUB_STEP_SUMMARY"
+          if [ "$core_result" -ne 0 ] || [ "$setup_result" -ne 0 ]; then
+            echo 'Testes legados falharam; pacote apenas experimental.'
+            exit 1
+          fi
+          echo 'Testes passaram; ainda precisa de validacao no FiveM.'
+
+      - name: Salvar diagnostico em caso de falha
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Diagnostico-DLL
+          path: |
+            dist/DLL_IMPORTS.txt
+            dist/appcore.h
+          if-no-files-found: ignore
+          retention-days: 7
