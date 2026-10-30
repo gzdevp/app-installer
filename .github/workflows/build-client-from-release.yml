@@ -79,9 +79,17 @@ jobs:
           Write-Host '=== Dependencias diretas ==='
           Get-Content 'dist/DLL_IMPORTS.txt'
           Write-Host '=== Teste Client.exe --probe-local ==='
-          & "$PWD\dist\Client.exe" --probe-local
-          $exitCode = $LASTEXITCODE
-          Write-Host "Codigo de saida do Host: $exitCode"
+          # Client.exe e' compilado com -mwindows (subsystem GUI). A invocacao
+          # direta via "&" pode nao aguardar nem preencher $LASTEXITCODE.
+          # Start-Process -Wait -PassThru captura o codigo real do processo.
+          $clientExe = (Resolve-Path 'dist/Client.exe').Path
+          $clientDir = (Resolve-Path 'dist').Path
+          $process = Start-Process -FilePath $clientExe -ArgumentList @('--probe-local') -WorkingDirectory $clientDir -Wait -PassThru
+          $exitCode = $process.ExitCode
+          if ($null -eq $exitCode) {
+            throw 'O processo terminou sem codigo de saida verificavel.'
+          }
+          Write-Host "Codigo real de saida do Host: $exitCode"
           if ($exitCode -ne 0) {
             Write-Host '=== Diagnostico Windows LoadLibraryExW ==='
             # Texto de uma linha evita here-string/C# multilinha quebrando o parser PowerShell.
