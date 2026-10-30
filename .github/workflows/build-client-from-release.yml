@@ -1,0 +1,93 @@
+name: Compilar Client e appcore.dll do ZIP da Release
+
+on:
+  push:
+    paths:
+      - '.github/workflows/build-client-from-release.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-2022
+    timeout-minutes: 45
+    steps:
+      - name: Instalar Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.23.2'
+
+      - name: Instalar MinGW-w64
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: false
+          path-type: inherit
+          install: mingw-w64-x86_64-gcc
+
+      - name: Baixar e extrair codigo da Release 1
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $asset = 'https://github.com/gzdevp/app-installer/releases/download/1/Client_DLL_v0_9_System32_Fonte_Build_Setup.zip'
+          Invoke-WebRequest -Uri $asset -OutFile 'fonte.zip'
+          Expand-Archive -LiteralPath 'fonte.zip' -DestinationPath '.' -Force
+          foreach ($p in @('core_source/go.mod','host_source/ClientHost.c','setup_source/go.mod')) {
+            if (-not (Test-Path $p)) { throw "Arquivo obrigatorio ausente: $p" }
+          }
+
+      - name: Compilar DLL, Host e testar carregamento
+        shell: msys2 {0}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cd core_source
+          GOOS=windows GOARCH=amd64 CGO_ENABLED=1 CC=gcc go vet ./...
+          GOOS=windows GOARCH=amd64 CGO_ENABLED=1 CC=gcc go test ./... -count=1 -timeout=10m
+          GOOS=windows GOARCH=amd64 CGO_ENABLED=1 CC=gcc go build -trimpath -buildmode=c-shared -o ../dist/appcore.dll .
+          cd ..
+          gcc -DUNICODE -D_UNICODE -O2 -Wall -Wextra -static-libgcc -municode -mwindows -o dist/Client.exe host_source/ClientHost.c
+          test -s dist/Client.exe
+          test -s dist/appcore.dll
+          test -s dist/appcore.h
+          for f in CoreABIVersion CoreProbe CoreStart; do grep -q "$f" dist/appcore.h; done
+          ./dist/Client.exe --probe-local
+
+      - name: Testar Host sem dependencias do MinGW no PATH
+        shell: pwsh
+        run: |
+          $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot;$env:SystemRoot\System32\Wbem"
+          & "$PWD\dist\Client.exe" --probe-local
+          if ($LASTEXITCODE -ne 0) { throw "Carregamento da DLL falhou: $LASTEXITCODE" }
+
+      - name: Compilar instalador com binarios gerados
+        shell: pwsh
+        run: |
+          Copy-Item 'dist/Client.exe' 'setup_source/payload/Client.exe' -Force
+          Copy-Item 'dist/appcore.dll' 'setup_source/payload/appcore.dll' -Force
+          Push-Location 'setup_source'
+          go test ./... -count=1
+          if ($LASTEXITCODE -ne 0) { throw 'Testes do instalador falharam' }
+          $env:GOOS = 'windows'; $env:GOARCH = 'amd64'; $env:CGO_ENABLED = '0'
+          go build -trimpath -o ../dist/Client_Setup_System32.exe .
+          if ($LASTEXITCODE -ne 0) { throw 'Compilacao do instalador falhou' }
+          Pop-Location
+          & "$PWD\dist\Client_Setup_System32.exe" --inspect-payload
+          if ($LASTEXITCODE -ne 0) { throw 'Verificacao do instalador falhou' }
+          Get-FileHash -Algorithm SHA256 dist/Client.exe,dist/appcore.dll,dist/Client_Setup_System32.exe |
+            ForEach-Object { "$($_.Hash)  $(Split-Path $_.Path -Leaf)" } |
+            Set-Content -Encoding ascii dist/SHA256SUMS.txt
+
+      - name: Salvar pacote experimental sem alterar Release principal
+        uses: actions/upload-artifact@v4
+        with:
+          name: Client-DLL-v0_9-Experimental
+          path: |
+            dist/Client.exe
+            dist/appcore.dll
+            dist/Client_Setup_System32.exe
+            dist/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 14
