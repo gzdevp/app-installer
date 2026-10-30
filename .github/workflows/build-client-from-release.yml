@@ -187,23 +187,39 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-      - name: Testes de regressao do codigo legado corrigido
+      - name: Testes de regressao do codigo legado corrigido (logs detalhados)
         shell: msys2 {0}
         run: |
           set +e
+          mkdir -p dist
           cd core_source
-          GOOS=windows GOARCH=amd64 CGO_ENABLED=1 CC=gcc go test ./... -count=1 -timeout=10m
-          core_result=$?
+          GOOS=windows GOARCH=amd64 CGO_ENABLED=1 CC=gcc go test ./... -count=1 -timeout=10m -v 2>&1 | tee ../dist/core_tests.log
+          core_result=${PIPESTATUS[0]}
           cd ../setup_source
-          GOOS=windows GOARCH=amd64 CGO_ENABLED=1 CC=gcc go test ./... -count=1 -timeout=5m
-          setup_result=$?
+          GOOS=windows GOARCH=amd64 CGO_ENABLED=1 CC=gcc go test ./... -count=1 -timeout=5m -v 2>&1 | tee ../dist/setup_tests.log
+          setup_result=${PIPESTATUS[0]}
           cd ..
-          echo '### Resultado dos testes de regressao' >> "$GITHUB_STEP_SUMMARY"
-          echo "- Testes do core: codigo $core_result" >> "$GITHUB_STEP_SUMMARY"
-          echo "- Testes do instalador: codigo $setup_result" >> "$GITHUB_STEP_SUMMARY"
-          echo '- Compilacao e carregamento nao confirmam funcionamento no FiveM.' >> "$GITHUB_STEP_SUMMARY"
+          printf 'core_exit=%s\nsetup_exit=%s\n' "$core_result" "$setup_result" > dist/TEST_RESULTS.txt
+          grep -nE -- '^--- FAIL:|^FAIL($|[[:space:]])|^panic:|^# [[:graph:]]|Error:' dist/core_tests.log > dist/CORE_FAILURES.txt || true
+          grep -nE -- '^--- FAIL:|^FAIL($|[[:space:]])|^panic:|^# [[:graph:]]|Error:' dist/setup_tests.log > dist/SETUP_FAILURES.txt || true
+          {
+            echo '### Resultado dos testes de regressao'
+            echo "- Testes do core: codigo $core_result"
+            echo "- Testes do instalador: codigo $setup_result"
+            echo '- Compilacao e carregamento nao confirmam funcionamento no FiveM.'
+            echo ''
+            echo '#### Falhas detectadas (core)'
+            echo '```text'
+            if [ -s dist/CORE_FAILURES.txt ]; then head -100 dist/CORE_FAILURES.txt; else echo '(nenhuma linha de falha encontrada)'; fi
+            echo '```'
+            echo '#### Falhas detectadas (instalador)'
+            echo '```text'
+            if [ -s dist/SETUP_FAILURES.txt ]; then head -80 dist/SETUP_FAILURES.txt; else echo '(nenhuma linha de falha encontrada)'; fi
+            echo '```'
+            echo 'Os logs integrais sao enviados no artifact Diagnostico-DLL se houver falha.'
+          } >> "$GITHUB_STEP_SUMMARY"
           if [ "$core_result" -ne 0 ] || [ "$setup_result" -ne 0 ]; then
-            echo 'Ha testes que ainda falham no codigo corrigido; nao liberar como estavel.'
+            echo 'Os testes falharam. Consulte a secao Build summary e o artifact Diagnostico-DLL.'
             exit 1
           fi
           echo 'Testes passaram; ainda precisa de validacao no FiveM.'
@@ -216,5 +232,10 @@ jobs:
           path: |
             dist/DLL_IMPORTS.txt
             dist/appcore.h
-          if-no-files-found: ignore
+            dist/core_tests.log
+            dist/setup_tests.log
+            dist/TEST_RESULTS.txt
+            dist/CORE_FAILURES.txt
+            dist/SETUP_FAILURES.txt
+          if-no-files-found: warn
           retention-days: 7
