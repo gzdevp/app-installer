@@ -161,6 +161,8 @@ jobs:
       - name: Compilar instalador com binarios gerados
         shell: pwsh
         run: |
+          # O ZIP fonte omite binarios gerados; a pasta payload deve ser criada no runner.
+          New-Item -ItemType Directory -Path 'setup_source/payload' -Force | Out-Null
           Copy-Item 'dist/Client.exe' 'setup_source/payload/Client.exe' -Force
           Copy-Item 'dist/appcore.dll' 'setup_source/payload/appcore.dll' -Force
           Push-Location 'setup_source'
@@ -174,6 +176,26 @@ jobs:
             ForEach-Object { "$($_.Hash)  $(Split-Path $_.Path -Leaf)" } |
             Set-Content -Encoding ascii dist/SHA256SUMS.txt
 
+      - name: Preparar teste local sem instalar
+        shell: pwsh
+        run: |
+          $lines = @(
+            '@echo off',
+            'setlocal EnableExtensions',
+            'if not exist "%~dp0Client.exe" (echo [ERRO] Client.exe ausente. & pause & exit /b 2)',
+            'if not exist "%~dp0appcore.dll" (echo [ERRO] appcore.dll ausente. & pause & exit /b 3)',
+            'echo Teste de carregamento local, sem System32 e sem FiveM.',
+            'start "" /wait "%~dp0Client.exe" --probe-local',
+            'set "probe_exit=%errorlevel%"',
+            'if not "%probe_exit%"=="0" (echo [FALHA] Host/DLL: codigo %probe_exit% & pause & exit /b %probe_exit%)',
+            'echo [OK] Host carregou a DLL e a ABI foi verificada.',
+            'echo ATENCAO: isso NAO prova funcionamento das funcoes do FiveM.',
+            'pause',
+            'exit /b 0'
+          )
+          $lines | Set-Content -Path 'dist/TESTAR_SEM_INSTALAR.cmd' -Encoding ascii
+          if (-not (Test-Path 'dist/TESTAR_SEM_INSTALAR.cmd')) { throw 'Falha ao preparar teste local' }
+
       - name: Salvar pacote experimental sem alterar Release principal
         uses: actions/upload-artifact@v4
         with:
@@ -182,6 +204,7 @@ jobs:
             dist/Client.exe
             dist/appcore.dll
             dist/Client_Setup_System32.exe
+            dist/TESTAR_SEM_INSTALAR.cmd
             dist/SHA256SUMS.txt
             dist/DLL_IMPORTS.txt
           if-no-files-found: error
